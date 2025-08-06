@@ -64,7 +64,7 @@ Look at`fsd_aliases` to see full list, or add more custom aliases.
 
 ```
 cd ~
-git clone git@github.com:AMZ-Driverless/fsd_skeleton.git
+git clone --recurse-submodules https://github.com/square033/fsd_skeleton.git
 ```
 **2 Install dependencies**
 ```
@@ -92,7 +92,11 @@ source fsd_environment.sh
 
 **5 Test setup**
 ```
-roslaunch fsd_common_meta trackdrive.launch
+roslaunch fssim_interface fssim.launch
+```
+in new terminal
+```
+roslaunch control_meta trackdrive.launch
 ```
 in new terminal
 ```
@@ -100,6 +104,14 @@ rqt_graph
 ```
 You should see all the nodes int the pipeline running
 - - - -
+if You have an error,
+Try this
+```
+sudo apt update
+```
+```
+sudo apt install ros-noetic-rqt-multiplot
+```
 
 # Run the workspace with FSSIM
 * see https://github.com/AMZ-Driverless/fssim#combine-it-with-simple-fsd-skeleton-framework-and-drive-a-lap
