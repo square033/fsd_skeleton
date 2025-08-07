@@ -18,22 +18,22 @@
 */
 
 #include <ros/ros.h>
-#include "pure_pursuit_handle.hpp"
+#include "mpc_handle.hpp"
 
-typedef ns_pure_pursuit::PurePursuitHandle PurePursuitHandle;
+typedef ns_mpc::MPCHandle MPCHandle;
 
 int main(int argc, char **argv) {
-  ros::init(argc, argv, "purePursuit");
+  ros::init(argc, argv, "mpcController");
   ros::NodeHandle nodeHandle("~");
-  PurePursuitHandle purePursuitHandle(nodeHandle);
-  ros::Rate loop_rate(purePursuitHandle.getNodeRate());
+
+  MPCHandle mpcHandle(nodeHandle);
+  ros::Rate loop_rate(mpcHandle.getNodeRate());
+
   while (ros::ok()) {
-
-    purePursuitHandle.run();
-
-    ros::spinOnce();                // Keeps node alive basically
-    loop_rate.sleep();              // Sleep for loop_rate
+    mpcHandle.run();
+    ros::spinOnce();
+    loop_rate.sleep();
   }
+
   return 0;
 }
-

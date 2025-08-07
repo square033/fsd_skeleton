@@ -1,0 +1,10 @@
+<launch>
+  <node
+    name="control_mpc_node"
+    pkg="control_mpc"
+    type="control_mpc"
+    output="screen">
+    
+    <rosparam command="load" file="$(find control_mpc)/config/mpc.yaml" />
+  </node>
+</launch>
