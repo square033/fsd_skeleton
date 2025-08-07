@@ -43,7 +43,7 @@ class PurePursuitHandle {
   void publishToTopics();
   void run();
   void sendControlCommand();
-//  void sendVisualization();
+  void sendVisualization();
 
  private:
   ros::NodeHandle nodeHandle_;

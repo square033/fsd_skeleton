@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
   ros::Rate loop_rate(purePursuitHandle.getNodeRate());
   while (ros::ok()) {
 
-    purePursuitHandle.run();
+    // purePursuitHandle.run();
 
     ros::spinOnce();                // Keeps node alive basically
     loop_rate.sleep();              // Sleep for loop_rate

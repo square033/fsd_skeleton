@@ -30,6 +30,7 @@ namespace ns_pure_pursuit {
 PurePursuitHandle::PurePursuitHandle(ros::NodeHandle &nodeHandle) :
     nodeHandle_(nodeHandle),
     pure_pursuit_(nodeHandle) {
+        
     ROS_INFO("Constructing Handle");
     loadParameters();
     subscribeToTopics();
