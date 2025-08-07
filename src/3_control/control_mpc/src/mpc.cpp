@@ -1,6 +1,13 @@
 #include <ros/ros.h>
 #include "mpc.hpp"
+
 #include <sstream>
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+#include <Eigen/Dense>
+#include <casadi/casadi.hpp>
 
 // ROS Msgs
 #include "visualization_msgs/MarkerArray.h"
@@ -39,45 +46,144 @@ void MPC::setVelocity(const fsd_common_msgs::CarStateDt &velocity) {
     velocity_ = velocity;
 }
 
-void MPC::runAlgorithm() {
-    createControlCommand();
-}
+std::vector<std::pair<double, double>> getReferenceTrajectory(
+    const std::vector<geometry_msgs::Point32>& center_line,
+    const double current_x,
+    const double current_y,
+    const int N,
+    const int gap = 2)
+{
+    std::vector<std::pair<double, double>> ref;
 
-void MPC::createControlCommand() {
-    if (center_line_.points.empty()) {
-        control_command_.throttle.data = static_cast<float>(-1.0);
-        control_command_.steering_angle.data = 0.0;
-        return;
-    }
+    if (center_line.empty()) return ref;
 
-    const auto it_center_line = std::min_element(center_line_.points.begin(), center_line_.points.end(),
+    // 1. 현재 위치에서 가장 가까운 점 찾기
+    const auto it_closest = std::min_element(center_line.begin(), center_line.end(),
         [&](const geometry_msgs::Point32 &a, const geometry_msgs::Point32 &b) {
-            const double da = std::hypot(state_.car_state.x - a.x, state_.car_state.y - a.y);
-            const double db = std::hypot(state_.car_state.x - b.x, state_.car_state.y - b.y);
+            const double da = std::hypot(current_x - a.x, current_y - a.y);
+            const double db = std::hypot(current_x - b.x, current_y - b.y);
             return da < db;
         });
 
-    const auto i_center_line = std::distance(center_line_.points.begin(), it_center_line);
-    const auto size = center_line_.points.size();
-    const auto i_next = (i_center_line + 10) % size;
-    geometry_msgs::Point32 next_point = center_line_.points[i_next];
+    const int closest_idx = std::distance(center_line.begin(), it_closest);
+    const int cl_size = center_line.size();
 
-    // Placeholder MPC logic (should be replaced with real MPC optimization)
-    {
-        const double beta_est = control_command_.steering_angle.data * 0.5;
-        const double eta = std::atan2(next_point.y - state_.car_state.y, next_point.x - state_.car_state.x)
-                            - (state_.car_state.theta + beta_est);
-        const double length = std::hypot(next_point.y - state_.car_state.y, next_point.x - state_.car_state.x);
-        control_command_.steering_angle.data = static_cast<float>(steering_p * std::atan(2.0 / length * std::sin(eta)));
+    // 2. 일정 간격으로 N개 점 추출
+    for (int i = 0; i < N; ++i) {
+        int idx = closest_idx + i * gap;
+        if (idx >= cl_size) idx = cl_size - 1;
+
+        ref.emplace_back(center_line[idx].x, center_line[idx].y);
     }
-    {
-        const double vel = std::hypot(state_.car_state_dt.car_state_dt.x, state_.car_state_dt.car_state_dt.y);
-        control_command_.throttle.data = static_cast<float>(speed_p * (max_speed_ - vel));
+
+    return ref;
+}
+
+void MPC::runAlgorithm() {
+    if (center_line_.points.empty()) {
+        control_command_.throttle = -1.0;
+        control_command_.steering = 0.0;
+        return;
     }
+
+    using namespace casadi;
+
+    const int N = 10;
+    const double dt = 0.1;
+    const double L = 1.33;
+    const double max_steer = 0.5;
+    const double max_acc = 3.0;
+
+    // Define state and control variables
+    SX x = SX::sym("x"), y = SX::sym("y"), theta = SX::sym("theta"), v = SX::sym("v");
+    SX steer = SX::sym("steer"), a = SX::sym("a");
+    SX state = vertcat({x, y, theta, v});
+    SX control = vertcat({steer, a});
+
+    SX rhs = vertcat({
+        v * cos(theta),
+        v * sin(theta),
+        v * tan(steer) / L,
+        a
+    });
+    Function f = Function("f", {state, control}, {rhs});
+
+    SX X = SX::sym("X", 4, N + 1);
+    SX U = SX::sym("U", 2, N);
+
+    DM x0 = DM::zeros(4);
+    x0(0) = state_.x;
+    x0(1) = state_.y;
+    x0(2) = state_.theta;
+    x0(3) = velocity_.velocity;
+
+    auto ref_traj = getReferenceTrajectory(center_line_.points, state_.x, state_.y, N);
+    std::vector<double> x_ref(N), y_ref(N);
+    for (int i = 0; i < N; ++i) {
+        x_ref[i] = ref_traj[i].first;
+        y_ref[i] = ref_traj[i].second;
+    }
+
+    SX cost = 0;
+    for (int k = 0; k < N; ++k) {
+        SX e_x = X(0, k) - x_ref[k];
+        SX e_y = X(1, k) - y_ref[k];
+        cost += e_x * e_x + e_y * e_y + 0.1 * U(0, k) * U(0, k) + 0.1 * U(1, k) * U(1, k);
+    }
+
+    std::vector<SX> g;
+    g.push_back(X(Slice(), 0) - x0);
+    for (int k = 0; k < N; ++k) {
+        SX x_next = X(Slice(), k) + dt * f(X(Slice(), k), U(Slice(), k))[0];
+        g.push_back(X(Slice(), k + 1) - x_next);
+    }
+
+    SXDict nlp = {
+        {"x", vertcat({reshape(X, 4 * (N + 1), 1), reshape(U, 2 * N, 1)})},
+        {"f", cost},
+        {"g", vertcat(g)}
+    };
+
+    Dict opts;
+    opts["ipopt.print_level"] = 0;
+    opts["print_time"] = 0;
+
+    Function solver = nlpsol("solver", "ipopt", nlp, opts);
+
+    std::vector<double> lbx(4 * (N + 1) + 2 * N, -inf);
+    std::vector<double> ubx(4 * (N + 1) + 2 * N, inf);
+    for (int k = 0; k < N; ++k) {
+        lbx[4 * (N + 1) + 2 * k] = -max_steer;
+        ubx[4 * (N + 1) + 2 * k] = max_steer;
+        lbx[4 * (N + 1) + 2 * k + 1] = -max_acc;
+        ubx[4 * (N + 1) + 2 * k + 1] = max_acc;
+    }
+
+    DMDict arg;
+    arg["x0"] = DM::zeros(4 * (N + 1) + 2 * N);
+    arg["lbx"] = lbx;
+    arg["ubx"] = ubx;
+    arg["lbg"] = std::vector<double>(g.size() * 4, 0);
+    arg["ubg"] = std::vector<double>(g.size() * 4, 0);
+
+    DMDict res = solver(arg);
+    DM sol = res["x"];
+    DM U_opt = sol(Slice(4 * (N + 1), sol.size1()));
+
+    control_command_.steering = static_cast<float>(U_opt(0));
+    control_command_.throttle = static_cast<float>(U_opt(1));
 
     // Visualize
     publishMarkers(it_center_line->x, it_center_line->y, next_point.x, next_point.y);
 }
+
+// void MPC::createControlCommand() {
+//     // 1. 가장 가까운 점 찾기
+//     // 2. 다음 목표점 설정
+//     // 3. Pure Pursuit 식 비슷하게 조향각 계산 (eta, atan 사용)
+//     // 4. 현재 속도와 max_speed 비교해서 throttle 계산
+
+// }
 
 void MPC::publishMarkers(double x_pos, double y_pos, double x_next, double y_next) const {
     visualization_msgs::MarkerArray markers;

@@ -16,6 +16,11 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   )
 
+find_package(Eigen3 REQUIRED)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CASADI REQUIRED casadi)
+
 catkin_package(
   INCLUDE_DIRS
   LIBRARIES
@@ -27,6 +32,8 @@ include_directories(
   include
   ${catkin_INCLUDE_DIRS}
   ${roscpp_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIRS}
+  ${CASADI_INCLUDE_DIRS}
 )
 
 # Each node in the package must be declared like this
@@ -37,4 +44,5 @@ add_executable(${PROJECT_NAME}
   )
 target_link_libraries(${PROJECT_NAME}
   ${catkin_LIBRARIES}
+  ${CASADI_LIBRARIES} 
   )

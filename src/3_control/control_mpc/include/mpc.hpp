@@ -33,7 +33,7 @@ class MPC {
     void runAlgorithm();
 
  private:
- 
+
     /**
      * Visualize
      */
@@ -52,6 +52,14 @@ class MPC {
 
     double max_speed_;
 };
+
+std::vector<std::pair<double, double>> getReferenceTrajectory(
+    const std::vector<geometry_msgs::Point32>& center_line,
+    double current_x,
+    double current_y,
+    int N,
+    int gap = 2);
+
 }
 
 #endif // CONTROL_MPC_HPP
