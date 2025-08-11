@@ -1,8 +1,8 @@
 velocity_estimate_topic_name: /estimation/velocity_estimation/velocity_estimate
 slam_map_topic_name: /estimation/slam/map
 slam_state_topic_name: /estimation/slam/state
-control_command_topic_name: /control/pure_pursuit/control_command
-center_line_topic_name: /control/pure_pursuit/center_line
+control_command_topic_name: /control/mpc/control_command
+center_line_topic_name: /control/mpc/center_line
 
 max_speed: 4  # [m/s]
 

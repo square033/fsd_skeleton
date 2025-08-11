@@ -1,3 +1,8 @@
+/*
+    Formula Student Driverless Project (FSD-Project).
+    GPLv3
+*/
+
 #include <ros/ros.h>
 #include "mpc.hpp"
 
@@ -46,6 +51,7 @@ void MPC::setVelocity(const fsd_common_msgs::CarStateDt &velocity) {
     velocity_ = velocity;
 }
 
+/*  ---- 주석 처리: 더 이상 사용하지 않음 (Pure Pursuit와 동일 로직으로 대체) ----
 std::vector<std::pair<double, double>> getReferenceTrajectory(
     const std::vector<geometry_msgs::Point32>& center_line,
     const double current_x,
@@ -77,6 +83,7 @@ std::vector<std::pair<double, double>> getReferenceTrajectory(
 
     return ref;
 }
+---- 주석 끝 ---- */
 
 void MPC::runAlgorithm() {
     if (center_line_.points.empty()) {
@@ -91,7 +98,7 @@ void MPC::runAlgorithm() {
     const double dt = 0.1;
     const double L = 1.33;
     const double max_steer = 0.5;
-    const double max_acc = 3.0;
+    const double max_acc   = 0.2;
 
     // Define state and control variables
     SX x = SX::sym("x"), y = SX::sym("y"), theta = SX::sym("theta"), v = SX::sym("v");
@@ -107,7 +114,7 @@ void MPC::runAlgorithm() {
 
     Function f = Function("f", {state, control}, {rhs});
 
-    // Decision variabless
+    // Decision variables
     SX X = SX::sym("X", 4, N + 1);
     SX U = SX::sym("U", 2, N);
 
@@ -116,18 +123,29 @@ void MPC::runAlgorithm() {
     x0(0) = state_.car_state.x;
     x0(1) = state_.car_state.y;
     x0(2) = state_.car_state.theta;
-    x0(3) = velocity_.car_state_dt.x; // 전진 속도(추후 필요시 바꾸세요)
+    x0(3) = velocity_.car_state_dt.x; // 필요시: hypot(vx,vy)로 교체 가능
 
-    // Reference trajectory
-    const int gap = 5; // 5m 
-    auto ref_traj = getReferenceTrajectory(center_line_.points,
-                                           state_.car_state.x,
-                                           state_.car_state.y, N);
-    std::vector<double> x_ref(N), y_ref(N);
-    for (int i = 0; i < N; ++i) {
-        x_ref[i] = ref_traj[i].first;
-        y_ref[i] = ref_traj[i].second;
-    }
+    // -------------------------------
+    // Pure Pursuit와 동일한 목표점 선택:
+    // 최근접 인덱스 + 고정 오프셋(lookahead), 모듈로 래핑
+    // -------------------------------
+    const auto it_closest = std::min_element(center_line_.points.begin(), center_line_.points.end(),
+        [&](const geometry_msgs::Point32 &a, const geometry_msgs::Point32 &b) {
+            const double da = std::hypot(state_.car_state.x - a.x, state_.car_state.y - a.y);
+            const double db = std::hypot(state_.car_state.x - b.x, state_.car_state.y - b.y);
+            return da < db;
+        });
+    const int i_center  = static_cast<int>(std::distance(center_line_.points.begin(), it_closest));
+    const int size      = static_cast<int>(center_line_.points.size());
+    const int lookahead = 10; // Pure Pursuit의 +10과 동일
+    const int i_next    = (i_center + lookahead) % size;
+
+    geometry_msgs::Point32 next_point = center_line_.points[i_next];
+
+    // PP처럼 하나의 목표점을 N 스텝 동안 반복해서 따라가게 설정
+    std::vector<double> x_ref(N, next_point.x);
+    std::vector<double> y_ref(N, next_point.y);
+    // -------------------------------
 
     // Cost
     SX cost = 0;
@@ -135,8 +153,8 @@ void MPC::runAlgorithm() {
         SX e_x = X(0, k) - x_ref[k];
         SX e_y = X(1, k) - y_ref[k];
         cost += e_x * e_x + e_y * e_y
-              + 0.1 * U(0, k) * U(0, k)
-              + 0.1 * U(1, k) * U(1, k);
+              + 0.1 * U(0, k) * U(0, k)  // steer penalty
+              + 0.1 * U(1, k) * U(1, k); // accel penalty
     }
 
     // ---- Build constraints and flatten variables (no vertcat/reshape) ----
@@ -199,7 +217,7 @@ void MPC::runAlgorithm() {
 
     // Solve
     DMDict arg;
-    arg["x0"] = DM::zeros(4 * (N + 1) + 2 * N);
+    arg["x0"]  = DM::zeros(4 * (N + 1) + 2 * N);
     arg["lbx"] = lbx;
     arg["ubx"] = ubx;
     arg["lbg"] = std::vector<double>(4 * (N + 1), 0.0);
@@ -208,20 +226,18 @@ void MPC::runAlgorithm() {
 
     DMDict res = solver(arg);
     DM sol = res["x"];
-    DM U_opt = sol(casadi::Slice(4 * (N + 1), sol.size1()));
 
     // Extract first control (u0)
-    float steer_cmd    = static_cast<float>(DM(U_opt(0)).scalar());
-    float throttle_cmd = static_cast<float>(DM(U_opt(1)).scalar());
+    const int offU = 4 * (N + 1);
+    DM U_opt = sol(casadi::Slice(offU, offU + 2 * N));
+    const double steer_cmd    = static_cast<double>(U_opt(0));
+    const double throttle_cmd = static_cast<double>(U_opt(1));
 
-    control_command_.steering_angle.data = steer_cmd;
-    control_command_.throttle.data       = throttle_cmd;
+    control_command_.steering_angle.data = static_cast<float>(steer_cmd);
+    control_command_.throttle.data       = static_cast<float>(throttle_cmd);
 
-    // Visualize
-    if (ref_traj.size() > 1) {
-        publishMarkers(ref_traj[0].first, ref_traj[0].second,
-                       ref_traj[1].first, ref_traj[1].second);
-    }
+    // Visualize: Pure Pursuit와 동일하게 "최근접점 vs 다음점"
+    publishMarkers(it_closest->x, it_closest->y, next_point.x, next_point.y);
 }
 
 void MPC::publishMarkers(double x_pos, double y_pos, double x_next, double y_next) const {
