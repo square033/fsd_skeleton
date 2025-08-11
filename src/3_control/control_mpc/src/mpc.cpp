@@ -51,7 +51,7 @@ std::vector<std::pair<double, double>> getReferenceTrajectory(
     const double current_x,
     const double current_y,
     const int N,
-    const int gap = 2)
+    const int gap)
 {
     std::vector<std::pair<double, double>> ref;
 
@@ -66,13 +66,12 @@ std::vector<std::pair<double, double>> getReferenceTrajectory(
         });
 
     const int closest_idx = std::distance(center_line.begin(), it_closest);
-    const int cl_size = center_line.size();
+    const int cl_size = static_cast<int>(center_line.size());
 
     // 2. 일정 간격으로 N개 점 추출
     for (int i = 0; i < N; ++i) {
         int idx = closest_idx + i * gap;
         if (idx >= cl_size) idx = cl_size - 1;
-
         ref.emplace_back(center_line[idx].x, center_line[idx].y);
     }
 
@@ -81,8 +80,8 @@ std::vector<std::pair<double, double>> getReferenceTrajectory(
 
 void MPC::runAlgorithm() {
     if (center_line_.points.empty()) {
-        control_command_.throttle = -1.0;
-        control_command_.steering = 0.0;
+        control_command_.throttle.data = -1.0f;
+        control_command_.steering_angle.data = 0.0f;
         return;
     }
 
@@ -97,93 +96,132 @@ void MPC::runAlgorithm() {
     // Define state and control variables
     SX x = SX::sym("x"), y = SX::sym("y"), theta = SX::sym("theta"), v = SX::sym("v");
     SX steer = SX::sym("steer"), a = SX::sym("a");
-    SX state = vertcat({x, y, theta, v});
-    SX control = vertcat({steer, a});
+    SX state(4,1);   state(0)=x;      state(1)=y;        state(2)=theta;        state(3)=v;
+    SX control(2,1); control(0)=steer; control(1)=a;
 
-    SX rhs = vertcat({
-        v * cos(theta),
-        v * sin(theta),
-        v * tan(steer) / L,
-        a
-    });
+    SX rhs(4,1);
+    rhs(0) = v * cos(theta);
+    rhs(1) = v * sin(theta);
+    rhs(2) = (v / L) * tan(steer);
+    rhs(3) = a;
+
     Function f = Function("f", {state, control}, {rhs});
 
+    // Decision variables
     SX X = SX::sym("X", 4, N + 1);
     SX U = SX::sym("U", 2, N);
 
+    // Initial state from messages
     DM x0 = DM::zeros(4);
-    x0(0) = state_.x;
-    x0(1) = state_.y;
-    x0(2) = state_.theta;
-    x0(3) = velocity_.velocity;
+    x0(0) = state_.car_state.x;
+    x0(1) = state_.car_state.y;
+    x0(2) = state_.car_state.theta;
+    x0(3) = velocity_.car_state_dt.x; // 전진 속도(추후 필요시 바꾸세요)
 
-    auto ref_traj = getReferenceTrajectory(center_line_.points, state_.x, state_.y, N);
+    // Reference trajectory
+    auto ref_traj = getReferenceTrajectory(center_line_.points,
+                                           state_.car_state.x,
+                                           state_.car_state.y, N);
     std::vector<double> x_ref(N), y_ref(N);
     for (int i = 0; i < N; ++i) {
         x_ref[i] = ref_traj[i].first;
         y_ref[i] = ref_traj[i].second;
     }
 
+    // Cost
     SX cost = 0;
     for (int k = 0; k < N; ++k) {
         SX e_x = X(0, k) - x_ref[k];
         SX e_y = X(1, k) - y_ref[k];
-        cost += e_x * e_x + e_y * e_y + 0.1 * U(0, k) * U(0, k) + 0.1 * U(1, k) * U(1, k);
+        cost += e_x * e_x + e_y * e_y
+              + 0.1 * U(0, k) * U(0, k)
+              + 0.1 * U(1, k) * U(1, k);
     }
 
-    std::vector<SX> g;
-    g.push_back(X(Slice(), 0) - x0);
+    // ---- Build constraints and flatten variables (no vertcat/reshape) ----
+    // Flatten X, U
+    SX Xvec(4 * (N + 1), 1);
+    for (int j = 0; j <= N; ++j)
+        for (int i = 0; i < 4; ++i)
+            Xvec(4 * j + i) = X(i, j);
+
+    SX Uvec(2 * N, 1);
+    for (int j = 0; j < N; ++j) {
+        Uvec(2 * j + 0) = U(0, j);
+        Uvec(2 * j + 1) = U(1, j);
+    }
+
+    // z = [vec(X); vec(U)]
+    SX z(4 * (N + 1) + 2 * N, 1);
+    for (int r = 0; r < 4 * (N + 1); ++r) z(r) = Xvec(r);
+    for (int r = 0; r < 2 * N;       ++r) z(4 * (N + 1) + r) = Uvec(r);
+
+    // Constraint vector G = 0 (size 4*(N+1))
+    SX x0_sym = SX::sym("x0_sym", 4);
+    SX G(4 * (N + 1), 1);
+
+    // Initial constraint: X(:,0) - x0
+    for (int i = 0; i < 4; ++i) G(i) = X(i, 0) - x0_sym(i);
+
+    // Dynamics constraints: X(:,k+1) - (X(:,k) + dt*f(...)) = 0
     for (int k = 0; k < N; ++k) {
-        SX x_next = X(Slice(), k) + dt * f(X(Slice(), k), U(Slice(), k))[0];
-        g.push_back(X(Slice(), k + 1) - x_next);
+        SX x_next = X(casadi::Slice(), k) + dt * f(std::vector<SX>{X(casadi::Slice(), k), U(casadi::Slice(), k)})[0];
+        for (int i = 0; i < 4; ++i) G(4 * (k + 1) + i) = X(i, k + 1) - x_next(i);
     }
 
-    SXDict nlp = {
-        {"x", vertcat({reshape(X, 4 * (N + 1), 1), reshape(U, 2 * N, 1)})},
-        {"f", cost},
-        {"g", vertcat(g)}
-    };
+    // NLP dict
+    SXDict nlp;
+    nlp["x"] = z;
+    nlp["f"] = cost;
+    nlp["g"] = G;
+    nlp["p"] = x0_sym;
 
+    // Solver options
     Dict opts;
     opts["ipopt.print_level"] = 0;
     opts["print_time"] = 0;
 
     Function solver = nlpsol("solver", "ipopt", nlp, opts);
 
+    // Bounds
+    double inf = std::numeric_limits<double>::infinity();
     std::vector<double> lbx(4 * (N + 1) + 2 * N, -inf);
-    std::vector<double> ubx(4 * (N + 1) + 2 * N, inf);
+    std::vector<double> ubx(4 * (N + 1) + 2 * N,  inf);
     for (int k = 0; k < N; ++k) {
-        lbx[4 * (N + 1) + 2 * k] = -max_steer;
-        ubx[4 * (N + 1) + 2 * k] = max_steer;
+        // steering bounds
+        lbx[4 * (N + 1) + 2 * k + 0] = -max_steer;
+        ubx[4 * (N + 1) + 2 * k + 0] =  max_steer;
+        // accel bounds
         lbx[4 * (N + 1) + 2 * k + 1] = -max_acc;
-        ubx[4 * (N + 1) + 2 * k + 1] = max_acc;
+        ubx[4 * (N + 1) + 2 * k + 1] =  max_acc;
     }
 
+    // Solve
     DMDict arg;
     arg["x0"] = DM::zeros(4 * (N + 1) + 2 * N);
     arg["lbx"] = lbx;
     arg["ubx"] = ubx;
-    arg["lbg"] = std::vector<double>(g.size() * 4, 0);
-    arg["ubg"] = std::vector<double>(g.size() * 4, 0);
+    arg["lbg"] = std::vector<double>(4 * (N + 1), 0.0);
+    arg["ubg"] = std::vector<double>(4 * (N + 1), 0.0);
+    arg["p"]   = x0;
 
     DMDict res = solver(arg);
     DM sol = res["x"];
-    DM U_opt = sol(Slice(4 * (N + 1), sol.size1()));
+    DM U_opt = sol(casadi::Slice(4 * (N + 1), sol.size1()));
 
-    control_command_.steering = static_cast<float>(U_opt(0));
-    control_command_.throttle = static_cast<float>(U_opt(1));
+    // Extract first control (u0)
+    float steer_cmd    = static_cast<float>(DM(U_opt(0)).scalar());
+    float throttle_cmd = static_cast<float>(DM(U_opt(1)).scalar());
+
+    control_command_.steering_angle.data = steer_cmd;
+    control_command_.throttle.data       = throttle_cmd;
 
     // Visualize
-    publishMarkers(it_center_line->x, it_center_line->y, next_point.x, next_point.y);
+    if (ref_traj.size() > 1) {
+        publishMarkers(ref_traj[0].first, ref_traj[0].second,
+                       ref_traj[1].first, ref_traj[1].second);
+    }
 }
-
-// void MPC::createControlCommand() {
-//     // 1. 가장 가까운 점 찾기
-//     // 2. 다음 목표점 설정
-//     // 3. Pure Pursuit 식 비슷하게 조향각 계산 (eta, atan 사용)
-//     // 4. 현재 속도와 max_speed 비교해서 throttle 계산
-
-// }
 
 void MPC::publishMarkers(double x_pos, double y_pos, double x_next, double y_next) const {
     visualization_msgs::MarkerArray markers;
