@@ -30,6 +30,12 @@ void MPCHandle::loadParameters() {
         ROS_WARN_STREAM("Did not load max_speed. Standard value is: " << max_speed_);
     }
 
+    if (!nodeHandle_.param<std::string>("slam_map_topic_name",
+                                    slam_map_topic_name_,
+                                    "/estimation/slam/map")) {
+    ROS_WARN_STREAM("Did not load slam_map_topic_name. Standard value is: " << slam_map_topic_name_);
+    }
+
     if (!nodeHandle_.param<std::string>("slam_state_topic_name",
                                         slam_state_topic_name_,
                                         "/estimation/slam/state")) {
@@ -62,6 +68,9 @@ void MPCHandle::loadParameters() {
 void MPCHandle::subscribeToTopics() {
     ROS_INFO("subscribe to MPC topics");
 
+    slamMapSubscriber_ = nodeHandle_.subscribe(
+        slam_map_topic_name_, 1, &MPCHandle::slamMapCallback, this);
+        
     slamStateSubscriber_ = nodeHandle_.subscribe(
         slam_state_topic_name_, 1, &MPCHandle::slamStateCallback, this);
 

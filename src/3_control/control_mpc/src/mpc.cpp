@@ -107,7 +107,7 @@ void MPC::runAlgorithm() {
 
     Function f = Function("f", {state, control}, {rhs});
 
-    // Decision variables
+    // Decision variabless
     SX X = SX::sym("X", 4, N + 1);
     SX U = SX::sym("U", 2, N);
 
@@ -119,6 +119,7 @@ void MPC::runAlgorithm() {
     x0(3) = velocity_.car_state_dt.x; // 전진 속도(추후 필요시 바꾸세요)
 
     // Reference trajectory
+    const int gap = 5; // 5m 
     auto ref_traj = getReferenceTrajectory(center_line_.points,
                                            state_.car_state.x,
                                            state_.car_state.y, N);

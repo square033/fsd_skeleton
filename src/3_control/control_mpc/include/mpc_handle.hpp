@@ -33,6 +33,7 @@ class MPCHandle {
   ros::Publisher controlCommandPublisher_;
   ros::Publisher centerLinePublisher_;
 
+  ros::Subscriber slamMapSubscriber_;
   ros::Subscriber slamStateSubscriber_;
   ros::Subscriber velocityEstimateSubscriber_;
   ros::Subscriber centerLineSubscriber_;
@@ -43,6 +44,7 @@ class MPCHandle {
   void velocityEstimateCallback(const fsd_common_msgs::CarStateDt &velocity);
 
   // Parameters
+  std::string slam_map_topic_name_;   // ★ 추가
   std::string slam_state_topic_name_;
   std::string velocity_estimate_topic_name_;
   std::string center_line_topic_name_;
